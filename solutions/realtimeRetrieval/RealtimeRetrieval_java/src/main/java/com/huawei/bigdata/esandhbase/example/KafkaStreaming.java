@@ -53,12 +53,6 @@ public class KafkaStreaming {
     private static final Logger LOG = LoggerFactory.getLogger(KafkaStreaming.class);
     private static Properties properties = new Properties();
 
-    private static TableName tableName = null;
-    private static Connection conn = null;
-    private static Admin admin = null;
-    private static Table table = null;
-    private static RestClient restClient = null;
-
     public static void main(String[] args)throws Exception {
         Configuration conf = HBaseConfiguration.create();
         //加载HDFS/HBase服务端配置，用于客户端与服务端对接
@@ -110,8 +104,40 @@ public class KafkaStreaming {
         //对consumer进行自定义配置。Subscribe方法提交参数列表和kafka参数的处理。
         ConsumerStrategy consumerStrategy = ConsumerStrategies.Subscribe(topicSet, kafkaParams);
 
+        //从Kafka接收数据并生成相应的DStream( DStream操作最终会转换成底层的RDD的操作)
+        JavaInputDStream<ConsumerRecord<String, String>> messages = KafkaUtils.createDirectStream(jsc, locationStrategy, consumerStrategy);
+        messages.foreachRDD(
+                new VoidFunction<JavaRDD<ConsumerRecord<String, String>>>() {
+                    @Override
+                    public void call(JavaRDD<ConsumerRecord<String, String>> consumerRecordJavaRDD) throws Exception {
+                        //使用 foreachPartition 方法，每个分区并发工作
+                        consumerRecordJavaRDD.foreachPartition(
+                                new VoidFunction<Iterator<ConsumerRecord<String, String>>>() {
+                                    @Override
+                                    public void call(Iterator<ConsumerRecord<String, String>> consumerRecordIterator) throws Exception {
+                                        hbaseAndESWrite(consumerRecordIterator);
+                                    }
+                                }
+                        );
+                    }
+                }
+        );
+        // Spark Streaming系统启动
+        jsc.start();
+        jsc.awaitTermination();
+    };
+
+    private static void hbaseAndESWrite(Iterator<ConsumerRecord<String, String>> consumerRecordIterator) throws Exception {
+        Configuration conf = HBaseConfiguration.create();
+        TableName tableName = null;
+        Connection conn = null;
+        Admin admin = null;
+        Table table = null;
+        RestClient restClient = null;
+
         ESSearch.init();
         restClient = ESSearch.getRestClient();
+        String indexName = "testindex";
         //判断要创建的索引名称是否已经存在,不存在则创建
         if (!ESSearch.exist(restClient,indexName)) {
             ESSearch.createIndex(indexName);
@@ -125,13 +151,19 @@ public class KafkaStreaming {
         {
             LOG.error("Failed to createConnection because ", e);
         }
-        tableName = TableName.valueOf(properties.getProperty("tableName"));
+        tableName = TableName.valueOf("testTableName");
         table = conn.getTable(tableName);
+
+        if(table == null) {
+            System.out.println("ttttttable is null"+table);
+        }
+
         try {
             admin = conn.getAdmin();
             if (!admin.tableExists(tableName))
             {
                 LOG.info("Creating table...");
+                System.out.println("Creating table...");
                 HTableDescriptor htd = new HTableDescriptor(tableName);
                 HColumnDescriptor hcd1 = new HColumnDescriptor("Basic");
                 HColumnDescriptor hcd2 = new HColumnDescriptor("OtherInfo");
@@ -147,67 +179,13 @@ public class KafkaStreaming {
             else
             {
                 LOG.warn("table already exists");
+                System.out.println("table already exists");
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
 
-        //从Kafka接收数据并生成相应的DStream( DStream操作最终会转换成底层的RDD的操作)
-        JavaInputDStream<ConsumerRecord<String, String>> messages = KafkaUtils.createDirectStream(jsc, locationStrategy, consumerStrategy);
-        messages.foreachRDD(
-            new VoidFunction<JavaRDD<ConsumerRecord<String, String>>>() {
-                @Override
-                public void call(JavaRDD<ConsumerRecord<String, String>> consumerRecordJavaRDD) throws Exception {
-                    //使用 foreachPartition 方法，每个分区并发工作
-                    consumerRecordJavaRDD.foreachPartition(
-                        new VoidFunction<Iterator<ConsumerRecord<String, String>>>() {
-                             @Override
-                             public void call(Iterator<ConsumerRecord<String, String>> consumerRecordIterator) throws Exception {
-                                  hbaseAndESWrite(consumerRecordIterator);
-                             }
-                        }
-                     );
-                }
-            }
-        );
-        // Spark Streaming系统启动
-        jsc.start();
-        jsc.awaitTermination();
 
-        if (table != null) {
-            try {
-                table.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-        if (admin != null) {
-            try {
-                admin.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-        if (conn != null) {
-            try {
-                // Close the HBase connection.
-                conn.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-        //在进行完Elasticsearch操作后，需要调用“restClient.close()”关闭所申请的资源。
-        if( restClient!=null) {
-            try {
-                restClient.close();
-                LOG.info("Close the client successful in main.");
-            } catch (Exception e1) {
-                LOG.error("Close the client failed in main.",e1);
-            }
-        }
-    };
-
-    private static void hbaseAndESWrite(Iterator<ConsumerRecord<String, String>> consumerRecordIterator) throws IOException {
         try {
             List<Put> putList = new ArrayList<Put>();
             while (consumerRecordIterator.hasNext()) {
@@ -254,5 +232,37 @@ public class KafkaStreaming {
         } catch (IOException e) {
             e.printStackTrace();
         }
+        if (table != null) {
+            try {
+                table.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        if (admin != null) {
+            try {
+                admin.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        if (conn != null) {
+            try {
+                // Close the HBase connection.
+                conn.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        //在进行完Elasticsearch操作后，需要调用“restClient.close()”关闭所申请的资源。
+        if( restClient!=null) {
+            try {
+                restClient.close();
+                LOG.info("Close the client successful in main.");
+            } catch (Exception e1) {
+                LOG.error("Close the client failed in main.",e1);
+            }
+        }
     }
+
 }
